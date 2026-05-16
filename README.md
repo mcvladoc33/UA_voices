@@ -36,6 +36,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 ```
+або без збереження кешу
+```bash
+pip install -r requirements.txt --no-cache-dir
+
+```
+
+очистка кешу
+```bash
+pip cache purge
+
+```
 
 ## 🚚 Завантаження моделей (Один раз)
 

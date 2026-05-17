@@ -8,6 +8,7 @@ sentencepiece
 pyyaml
 librosa
 scipy
+pydub
 git+https://github.com/patriotyk/ukrainian-word-stress.git
 git+https://github.com/patriotyk/ipa-uk.git
 git+https://github.com/patriotyk/styletts2-inference@105aed29fa1a7698d08d920986890e9bbd03447c

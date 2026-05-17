@@ -4,5 +4,6 @@
   "reference_filename": "sample.wav",
   "speed": 1.0,
   "noise_scale": 0.0,
-  "match_duration": true
+  "match_duration": true,
+  "use_verbalizer": true
 }

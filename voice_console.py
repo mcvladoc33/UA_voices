@@ -9,7 +9,24 @@ import librosa
 from unicodedata import normalize
 from num2words import num2words
 
-# 100% Офлайн режим для Hugging Face
+# =====================================================================
+# 🤫 ПРИДУШЕННЯ ВСІХ СИСТЕМНИХ ПОПЕРЕДЖЕНЬ (WARNINGS) ТА ЛОГІВ ШІ
+# =====================================================================
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+# Забороняємо бібліотеці transformers спамити в консоль
+import logging
+
+logging.getLogger("transformers").setLevel(logging.ERROR)
+os.environ["BITSANDBYTES_NOWELCOME"] = "1"
+
+# =====================================================================
+# 🔒 100% ОФЛАЙН РЕЖИМ ДЛЯ HUGGING FACE ТА ПАТЧІ ДЛЯ WINDOWS
+# =====================================================================
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
@@ -18,24 +35,32 @@ STYLETTS_PATH = os.path.join(BASE_DIR, "models", "styletts2_ukrainian_multispeak
 VERBALIZER_PATH = os.path.join(BASE_DIR, "models", "mbart-large-50-verbalization")
 PRESET_DIR = os.path.join(BASE_DIR, "voices")
 REF_DIR = os.path.join(BASE_DIR, "references")
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
-# Автоматичне створення робочих папок розробника
 os.makedirs(PRESET_DIR, exist_ok=True)
 os.makedirs(REF_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 🛠️ Налаштування шляхів до FFmpeg (робимо ДО імпорту pydub!)
+FFMPEG_BIN = os.path.join(BASE_DIR, "bin")
+os.environ["PATH"] += os.path.pathsep + FFMPEG_BIN
+
+from pydub import AudioSegment
+
+AudioSegment.converter = os.path.join(FFMPEG_BIN, "ffmpeg.exe")
+AudioSegment.ffprobe = os.path.join(FFMPEG_BIN, "ffprobe.exe")
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"--- UA_voices [Конфіг-Керування] (Робота на: {device.upper()}) ---")
 
-# =====================================================================
-# 🔥 ПАТЧІ ДЛЯ ЛОКАЛЬНОГО ІНФЕРЕНСУ (ОФЛАЙН)
-# =====================================================================
 import styletts2_inference.models
 
 
 def fake_hf_hub_download(repo_id, filename, **kwargs):
     local_file_path = os.path.join(repo_id, filename)
-    if os.path.exists(local_file_path): return local_file_path
+    if os.path.exists(local_file_path):
+        return local_file_path
     raise FileNotFoundError(f"Файл моделі не знайдено локально: {local_file_path}")
 
 
@@ -45,7 +70,8 @@ original_open = open
 
 
 def utf8_open(*args, **kwargs):
-    if 'encoding' not in kwargs: kwargs['encoding'] = 'utf-8'
+    if 'encoding' not in kwargs:
+        kwargs['encoding'] = 'utf-8'
     return original_open(*args, **kwargs)
 
 
@@ -64,19 +90,28 @@ mode = config.get("mode", "1")
 speed = config.get("speed", 1.0)
 noise_scale = config.get("noise_scale", 0.1)
 match_duration = config.get("match_duration", False)
+use_verbalizer = config.get("use_verbalizer", True)
 
 # 2. Ініціалізація ШІ Моделей
-print("⏳ Завантаження лінгвістичного вербалізатора mBART...")
-from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+verbalizer_model = None
+tokenizer = None
 
-try:
-    tokenizer = MBart50TokenizerFast.from_pretrained(VERBALIZER_PATH, local_files_only=True)
-    verbalizer_model = MBartForConditionalGeneration.from_pretrained(VERBALIZER_PATH, local_files_only=True).to(device)
-    tokenizer.src_lang = "uk_UA"
-    tokenizer.tgt_lang = "uk_UA"
-except Exception as e:
-    print(f"⚠️ mBART не завантажено ({e}), працює алгоритмічна заміна.")
-    verbalizer_model = None
+if use_verbalizer:
+    print("⏳ Завантаження лінгвістичного вербалізатора mBART...")
+    from transformers import MBartForConditionalGeneration, MBart50TokenizerFast
+
+    try:
+        tokenizer = MBart50TokenizerFast.from_pretrained(VERBALIZER_PATH, local_files_only=True)
+        verbalizer_model = MBartForConditionalGeneration.from_pretrained(VERBALIZER_PATH, local_files_only=True).to(
+            device)
+        tokenizer.src_lang = "uk_UA"
+        tokenizer.tgt_lang = "uk_UA"
+        print("✅ Вербалізатор mBART успішно завантажено в пам'ять.")
+    except Exception as e:
+        print(f"⚠️ mBART не завантажено ({e}), працює швидка алгоритмічна заміна.")
+        verbalizer_model = None
+else:
+    print("ℹ️ Вербалізатор mBART вимкнено в config.json (Заощаджено ~2 ГБ ОЗП).")
 
 print("⏳ Завантаження нейромережі синтезу StyleTTS2...")
 from styletts2_inference.models import StyleTTS2
@@ -101,7 +136,7 @@ def split_to_parts(text_data):
     return [p.strip() for p in parts if p.strip()]
 
 
-# 3. Підготовка обраного голосу відповідно до конфігу
+# 3. Підготовка обраного голосу відповідно до конфігурації
 style = None
 target_duration = None
 
@@ -120,10 +155,11 @@ elif mode == "2":
     if not os.path.exists(ref_path):
         print(f"❌ Помилка: Аудіо-референс '{ref_file}' не знайдено у папці {REF_DIR}")
         exit(1)
-    print(f"🎭 Режим: Клонування. Вилучення сигнатури з файлу: {ref_file}")
+    print(f"🎭 Режим: Клонування голосу. Аналіз характеристик файлу: {ref_file}")
 
     style = multi_model.extract_voice_features(ref_path)
-    if isinstance(style, list): style = style[-1]
+    if isinstance(style, list):
+        style = style[-1]
     style = style.to(device)
 
     y, _ = librosa.load(ref_path, sr=24000)
@@ -133,9 +169,9 @@ else:
     print("❌ Помилка: Невідомий режим (mode) у config.json. Вкажіть '1' або '2'.")
     exit(1)
 
-print("\n🚀 СИСТЕМА ГОТОВА! Меню вимкнено. Просто пишіть текст.")
+print("\n🚀 СИСТЕМА ГОТОВА! Просто пишіть ваш текст.")
 
-# 4. Головний чистий робочий цикл
+# 4. Головний робочий цикл програми
 while True:
     text = input("\nВведіть текст українською (або 'exit' для виходу): ").strip()
     if text.lower() == 'exit' or not text:
@@ -143,17 +179,34 @@ while True:
         break
 
     try:
-        # Вербалізація чисел
-        if verbalizer_model:
-            inputs = tokenizer(text, return_tensors="pt", padding=True).to(device)
-            generated_tokens = verbalizer_model.generate(
-                **inputs, forced_bos_token_id=tokenizer.lang_code_to_id["uk_UA"], max_length=256
-            )
-            clean_text = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
-        else:
-            clean_text = text
+        # 🧠 Розумне пореченнєве очищення тексту за допомогою mBART
+        raw_sentences = re.split(r'(?<=[.!?])\s+', text)
+        processed_sentences = []
 
-        # Резервний фільтр цифр
+        for s in raw_sentences:
+            if not s.strip():
+                continue
+
+            if use_verbalizer and verbalizer_model and re.search(r'\d+', s):
+                inputs = tokenizer(s, return_tensors="pt", padding=True).to(device)
+                generated_tokens = verbalizer_model.generate(
+                    **inputs,
+                    forced_bos_token_id=tokenizer.lang_code_to_id["uk_UA"],
+                    max_length=len(s) + 40,
+                    no_repeat_ngram_size=3,
+                    early_stopping=True
+                )
+                clean_s = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0]
+                processed_sentences.append(clean_s.strip())
+            else:
+                processed_sentences.append(s.strip())
+
+        clean_text = " ".join(processed_sentences)
+
+        # Локальний англо-патч (заміна англійського Advel на укр. Адвел)
+        clean_text = re.sub(r'\badvel\b', 'Адвел', clean_text, flags=re.IGNORECASE)
+
+        # Надійний бекап-фільтр для випадкових поодиноких цифр
         if re.search(r'\d+', clean_text):
             clean_text = re.sub(r'\d+', lambda m: num2words(int(m.group(0)), lang='uk'), clean_text)
 
@@ -161,7 +214,7 @@ while True:
         parts = split_to_parts(clean_text)
         final_speed = speed
 
-        # Розрахунок Smart Duration (якщо увімкнено)
+        # Розрахунок Smart Duration для режиму клонування голосу
         if mode == "2" and match_duration and target_duration:
             temp_wavs = []
             for t in parts:
@@ -177,7 +230,7 @@ while True:
                 if 0.6 <= calc_speed <= 1.4:
                     final_speed = calc_speed
 
-        # Генерація аудіо по шматках
+        # Пофрагментний синтез аудіо
         result_wav = []
         for t in parts:
             t_norm = normalize('NFKC', t.replace('+', StressSymbol.CombiningAcuteAccent))
@@ -192,16 +245,39 @@ while True:
                 result_wav.append(wav.cpu().numpy().flatten())
 
         if not result_wav:
-            print("❌ Помилка синтезу.")
+            print("❌ Помилка: Не вдалося розпізнати фонет у тексті.")
             continue
 
         audio_data = np.concatenate(result_wav)
 
-        # Миттєве відтворення та тихий фоновий запис результату
+        # Визначення шляхів збереження файлів у теку outputs/
+        wav_output_path = os.path.join(OUTPUT_DIR, "output.wav")
+        mp3_output_path = os.path.join(OUTPUT_DIR, "output.mp3")
+
+        # Миттєве відтворення аудіо
         print("🔊 Озвучую...")
         sd.play(audio_data, 24000)
-        sf.write("output.wav", audio_data, 24000)
+
+        # 💾 Збереження у WAV
+        sf.write(wav_output_path, audio_data, 24000)
+
+        # 💾 Конвертація та збереження в MP3 через pydub (із правильним конвертуванням float32 -> int16)
+        try:
+            clipped_audio = np.clip(audio_data, -1.0, 1.0)
+            int16_audio = (clipped_audio * 32767).astype(np.int16)
+
+            audio_segment = AudioSegment(
+                int16_audio.tobytes(),
+                frame_rate=24000,
+                sample_width=2,
+                channels=1
+            )
+            audio_segment.export(mp3_output_path, format="mp3", bitrate="192k")
+            print(f"💾 Файли успішно створено в 'outputs/':\n   └─ output.wav\n   └─ output.mp3")
+        except Exception as mp3_err:
+            print(f"⚠️ Не вдалося зберегти MP3 ({mp3_err}). Переконайся, що папка 'bin' містить ffmpeg.exe.")
+
         sd.wait()
 
     except Exception as e:
-        print(f"❌ Сталася помилка: {e}")
+        print(f"❌ Сталася помилка під час обробки: {e}")
